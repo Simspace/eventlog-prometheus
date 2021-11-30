@@ -1,3 +1,5 @@
+-- | Description: Expose eventlog aggregates as a prometheus server
+
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}

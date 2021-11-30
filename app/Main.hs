@@ -1,3 +1,6 @@
+-- | Description: a simple executable to start a prometheus server
+-- with the eventlog output.
+
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeApplications #-}
