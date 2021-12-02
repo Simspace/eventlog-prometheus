@@ -154,7 +154,7 @@ trackEvents m = \case
   _ -> pure ()
 
 withEvents :: N.Socket -> (Event -> IO ()) -> IO ()
-withEvents sock k = do
+withEvents sock eventContinuation = do
   let getBytes :: IO B.ByteString
       getBytes =
         NBS.recv sock 4096 >>= \bs -> case B.null bs of
@@ -162,6 +162,8 @@ withEvents sock k = do
           False -> pure bs
 
   let getHeader :: IO (Header, B.ByteString)
+  -- The bytes returned here are leftover bytes after we parse the
+  -- header, so they should be fed into the event parser
       getHeader =
         let loop mhdr = \case
               Consume cont -> do
@@ -192,7 +194,7 @@ withEvents sock k = do
         Consume cont -> do
           getEvents . cont =<< getBytes
         Produce a d -> do
-          _ <- try @SomeException (k a)
+          _ <- try @SomeException (eventContinuation a)
           getEvents d
         Done _ -> pure ()
         Error _ errmsg -> do
