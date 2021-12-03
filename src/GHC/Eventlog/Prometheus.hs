@@ -82,7 +82,7 @@ startPrometheusServer port r m sock = do
     _ <- forkIO do
       restore (withEvents sock (trackEvents m)) `finally` killThread ptid
     pure ()
-  serveMetrics port [] (sample r)
+  serveMetrics port ["metrics"] (sample r)
 
 createMetrics :: Int -> IO (Registry, Array Int Metrics)
 createMetrics capCount = do
