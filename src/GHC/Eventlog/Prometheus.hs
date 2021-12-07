@@ -1,6 +1,7 @@
 -- | Description: Expose eventlog aggregates as a prometheus server
 
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -12,6 +13,8 @@ module GHC.Eventlog.Prometheus
   )
 where
 
+import Data.Word
+import Data.IORef
 import Control.Concurrent
 import Control.Exception (SomeException, finally, mask, onException, try)
 import Data.Array (Array, listArray, (!))
@@ -72,7 +75,24 @@ data Metrics = Metrics
     threadMigrateOutCount :: {-# UNPACK #-} !Counter,
     threadWakeupSendCount :: {-# UNPACK #-} !Counter,
     threadWakeupRecvCount :: {-# UNPACK #-} !Counter,
-    threadRunCount :: {-# UNPACK #-} !Counter
+    threadRunCount :: {-# UNPACK #-} !Counter,
+    threadHeapOverflowTime :: {-# UNPACK #-} !Counter,
+    threadStackOverflowTime :: {-# UNPACK #-} !Counter,
+    threadYieldTime :: {-# UNPACK #-} !Counter,
+    threadBlockedTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnForeignCallTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnMvarTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnMvarReadTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnBlackHoleTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnReadTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnWriteTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnDelayTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnStmTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnMsgThrowToTime :: {-# UNPACK #-} !Counter,
+    threadBlockedOnOtherTime :: {-# UNPACK #-} !Counter,
+    threadFinishedTime :: {-# UNPACK #-} !Counter,
+    threadRunTime :: {-# UNPACK #-} !Counter,
+    lastEvTime :: {-# UNPACK #-} !(IORef Word64)
   }
 
 startPrometheusServer :: Int -> Registry -> Array Int Metrics -> N.Socket -> IO ()
@@ -116,37 +136,64 @@ createMetrics capCount = do
     threadBlockedOnForeignCallCount <- mkCounter "thread_stop_count" [("status", "foreign_call")]
     threadBlockedOnMsgThrowToCount <- mkCounter "thread_stop_count" [("status", "throw_to")]
     threadFinishedCount <- mkCounter "thread_stop_count" [("status", "finished")]
+    threadHeapOverflowTime <- mkCounter "thread_stop_time" [("status", "heap_overflow")]
+    threadStackOverflowTime <- mkCounter "thread_stop_time" [("status", "stack_overflow")]
+    threadYieldTime <- mkCounter "thread_stop_time" [("status", "yield")]
+    threadBlockedOnOtherTime <- mkCounter "thread_stop_time" [("status", "other")]
+    threadBlockedTime <- mkCounter "thread_stop_time" [("status", "blocked")]
+    threadBlockedOnMvarTime <- mkCounter "thread_stop_time" [("status", "mvar")]
+    threadBlockedOnMvarReadTime <- mkCounter "thread_stop_time" [("status", "mvar_read")]
+    threadBlockedOnBlackHoleTime <- mkCounter "thread_stop_time" [("status", "black_hole")]
+    threadBlockedOnReadTime <- mkCounter "thread_stop_time" [("status", "read")]
+    threadBlockedOnWriteTime <- mkCounter "thread_stop_time" [("status", "write")]
+    threadBlockedOnDelayTime <- mkCounter "thread_stop_time" [("status", "delay")]
+    threadBlockedOnStmTime <- mkCounter "thread_stop_time" [("status", "stm")]
+    threadBlockedOnForeignCallTime <- mkCounter "thread_stop_time" [("status", "foreign_call")]
+    threadBlockedOnMsgThrowToTime <- mkCounter "thread_stop_time" [("status", "throw_to")]
+    threadFinishedTime <- mkCounter "thread_stop_time" [("status", "finished")]
+    threadRunTime <- mkCounter "thread_run_time" []
+    lastEvTime <- newIORef 0
     pure Metrics {..}
 
   pure (r, listArray (0, length cs - 1) cs)
 
 trackEvents :: Array Int Metrics -> Event -> IO ()
 trackEvents m = \case
-  Event _ ei (Just capN) ->
+  Event et ei (Just capN) ->
     let capM = m ! capN
+        update timeSel countSel = do
+          prevTime <- readIORef (lastEvTime capM)
+          case prevTime of
+            0 -> pure ()
+            _ ->
+              let delta = fromIntegral (et - prevTime)
+              in Counter.add delta (timeSel capM)
+          Counter.inc (countSel capM)
+          writeIORef (lastEvTime capM) et
      in case ei of
           CreateThread _ -> Counter.inc (threadCreateCount capM)
           MigrateThread _ tgt -> do
             let tgtM = m ! tgt
             Counter.inc (threadMigrateOutCount capM)
             Counter.inc (threadMigrateInCount tgtM)
-          StopThread _ st -> case st of
-            HeapOverflow -> Counter.inc (threadHeapOverflowCount capM)
-            StackOverflow -> Counter.inc (threadStackOverflowCount capM)
-            ThreadYielding -> Counter.inc (threadYieldCount capM)
-            ThreadBlocked -> Counter.inc (threadBlockedCount capM)
-            ThreadFinished -> Counter.inc (threadFinishedCount capM)
-            ForeignCall -> Counter.inc (threadBlockedOnForeignCallCount capM)
-            BlockedOnMVar -> Counter.inc (threadBlockedOnMvarCount capM)
-            BlockedOnMVarRead -> Counter.inc (threadBlockedOnMvarReadCount capM)
-            BlockedOnBlackHole -> Counter.inc (threadBlockedOnBlackHoleCount capM)
-            BlockedOnRead -> Counter.inc (threadBlockedOnReadCount capM)
-            BlockedOnWrite -> Counter.inc (threadBlockedOnWriteCount capM)
-            BlockedOnDelay -> Counter.inc (threadBlockedOnDelayCount capM)
-            BlockedOnSTM -> Counter.inc (threadBlockedOnStmCount capM)
-            BlockedOnMsgThrowTo -> Counter.inc (threadBlockedOnMsgThrowToCount capM)
-            _ -> Counter.inc (threadBlockedOnOtherCount capM)
-          RunThread _ -> Counter.inc (threadRunCount capM)
+          StopThread _ st -> do
+            case st of
+              HeapOverflow -> update threadHeapOverflowTime threadHeapOverflowCount
+              StackOverflow -> update threadStackOverflowTime threadStackOverflowCount
+              ThreadYielding -> update threadYieldTime threadYieldCount
+              ThreadBlocked -> update threadBlockedTime threadBlockedCount
+              ThreadFinished -> update threadFinishedTime threadFinishedCount
+              ForeignCall -> update threadBlockedOnForeignCallTime threadBlockedOnForeignCallCount
+              BlockedOnMVar -> update threadBlockedOnMvarTime threadBlockedOnMvarCount
+              BlockedOnMVarRead -> update threadBlockedOnMvarReadTime threadBlockedOnMvarReadCount
+              BlockedOnBlackHole -> update threadBlockedOnBlackHoleTime threadBlockedOnBlackHoleCount
+              BlockedOnRead -> update threadBlockedOnReadTime threadBlockedOnReadCount
+              BlockedOnWrite -> update threadBlockedOnWriteTime threadBlockedOnWriteCount
+              BlockedOnDelay -> update threadBlockedOnDelayTime threadBlockedOnDelayCount
+              BlockedOnSTM -> update threadBlockedOnStmTime threadBlockedOnStmCount
+              BlockedOnMsgThrowTo -> update threadBlockedOnMsgThrowToTime threadBlockedOnMsgThrowToCount
+              _ -> update threadBlockedOnOtherTime threadBlockedOnOtherCount
+          RunThread _ -> update threadRunTime threadRunCount
           WakeupThread _ tgt -> do
             Counter.inc (threadWakeupSendCount capM)
             Counter.inc (threadWakeupRecvCount (m ! tgt))
