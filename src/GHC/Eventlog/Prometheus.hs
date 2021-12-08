@@ -92,7 +92,9 @@ data Metrics = Metrics
     threadBlockedOnOtherTime :: {-# UNPACK #-} !Counter,
     threadFinishedTime :: {-# UNPACK #-} !Counter,
     threadRunTime :: {-# UNPACK #-} !Counter,
-    lastEvTime :: {-# UNPACK #-} !(IORef Word64)
+    gcTime :: {-# UNPACK #-} !Counter,
+    lastEvTime :: {-# UNPACK #-} !(IORef Word64),
+    lastEvTimeCounter :: {-# UNPACK #-} !(IORef (Maybe Counter))
   }
 
 startPrometheusServer :: Int -> Registry -> Array Int Metrics -> N.Socket -> IO ()
@@ -152,7 +154,9 @@ createMetrics capCount = do
     threadBlockedOnMsgThrowToTime <- mkCounter "thread_stop_time" [("status", "throw_to")]
     threadFinishedTime <- mkCounter "thread_stop_time" [("status", "finished")]
     threadRunTime <- mkCounter "thread_run_time" []
+    gcTime <- mkCounter "gc_time" []
     lastEvTime <- newIORef 0
+    lastEvTimeCounter <- newIORef Nothing
     pure Metrics {..}
 
   pure (r, listArray (0, length cs - 1) cs)
@@ -161,15 +165,21 @@ trackEvents :: Array Int Metrics -> Event -> IO ()
 trackEvents m = \case
   Event et ei (Just capN) ->
     let capM = m ! capN
-        update timeSel countSel = do
+        updateState timeSel mcountSel = do
           prevTime <- readIORef (lastEvTime capM)
-          case prevTime of
-            0 -> pure ()
-            _ ->
+          mPrevEv <- readIORef (lastEvTimeCounter capM)
+          case mPrevEv of
+            Nothing -> pure ()
+            Just prevEv ->
               let delta = fromIntegral (et - prevTime)
-              in Counter.add delta (timeSel capM)
-          Counter.inc (countSel capM)
+              in Counter.add delta prevEv
+          case mcountSel of
+            Nothing -> pure ()
+            Just countSel -> Counter.inc (countSel capM)
           writeIORef (lastEvTime capM) et
+          writeIORef (lastEvTimeCounter capM) (Just (timeSel capM))
+        updateTC a b = updateState a (Just b)
+        updateT a = updateState a Nothing
      in case ei of
           CreateThread _ -> Counter.inc (threadCreateCount capM)
           MigrateThread _ tgt -> do
@@ -178,22 +188,25 @@ trackEvents m = \case
             Counter.inc (threadMigrateInCount tgtM)
           StopThread _ st -> do
             case st of
-              HeapOverflow -> update threadHeapOverflowTime threadHeapOverflowCount
-              StackOverflow -> update threadStackOverflowTime threadStackOverflowCount
-              ThreadYielding -> update threadYieldTime threadYieldCount
-              ThreadBlocked -> update threadBlockedTime threadBlockedCount
-              ThreadFinished -> update threadFinishedTime threadFinishedCount
-              ForeignCall -> update threadBlockedOnForeignCallTime threadBlockedOnForeignCallCount
-              BlockedOnMVar -> update threadBlockedOnMvarTime threadBlockedOnMvarCount
-              BlockedOnMVarRead -> update threadBlockedOnMvarReadTime threadBlockedOnMvarReadCount
-              BlockedOnBlackHole -> update threadBlockedOnBlackHoleTime threadBlockedOnBlackHoleCount
-              BlockedOnRead -> update threadBlockedOnReadTime threadBlockedOnReadCount
-              BlockedOnWrite -> update threadBlockedOnWriteTime threadBlockedOnWriteCount
-              BlockedOnDelay -> update threadBlockedOnDelayTime threadBlockedOnDelayCount
-              BlockedOnSTM -> update threadBlockedOnStmTime threadBlockedOnStmCount
-              BlockedOnMsgThrowTo -> update threadBlockedOnMsgThrowToTime threadBlockedOnMsgThrowToCount
-              _ -> update threadBlockedOnOtherTime threadBlockedOnOtherCount
-          RunThread _ -> update threadRunTime threadRunCount
+              HeapOverflow -> updateTC threadHeapOverflowTime threadHeapOverflowCount
+              StackOverflow -> updateTC threadStackOverflowTime threadStackOverflowCount
+              ThreadYielding -> updateTC threadYieldTime threadYieldCount
+              ThreadBlocked -> updateTC threadBlockedTime threadBlockedCount
+              ThreadFinished -> updateTC threadFinishedTime threadFinishedCount
+              ForeignCall -> updateTC threadBlockedOnForeignCallTime threadBlockedOnForeignCallCount
+              BlockedOnMVar -> updateTC threadBlockedOnMvarTime threadBlockedOnMvarCount
+              BlockedOnMVarRead -> updateTC threadBlockedOnMvarReadTime threadBlockedOnMvarReadCount
+              BlockedOnBlackHole -> updateTC threadBlockedOnBlackHoleTime threadBlockedOnBlackHoleCount
+              BlockedOnRead -> updateTC threadBlockedOnReadTime threadBlockedOnReadCount
+              BlockedOnWrite -> updateTC threadBlockedOnWriteTime threadBlockedOnWriteCount
+              BlockedOnDelay -> updateTC threadBlockedOnDelayTime threadBlockedOnDelayCount
+              BlockedOnSTM -> updateTC threadBlockedOnStmTime threadBlockedOnStmCount
+              BlockedOnMsgThrowTo -> updateTC threadBlockedOnMsgThrowToTime threadBlockedOnMsgThrowToCount
+              _ -> updateTC threadBlockedOnOtherTime threadBlockedOnOtherCount
+          RunThread _ -> updateTC threadRunTime threadRunCount
+          RequestParGC -> updateT gcTime
+          RequestSeqGC -> updateT gcTime
+          StartGC -> updateT gcTime
           WakeupThread _ tgt -> do
             Counter.inc (threadWakeupSendCount capM)
             Counter.inc (threadWakeupRecvCount (m ! tgt))
