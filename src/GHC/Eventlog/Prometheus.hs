@@ -165,6 +165,18 @@ trackEvents :: Array Int Metrics -> Event -> IO ()
 trackEvents m = \case
   Event et ei (Just capN) ->
     let capM = m ! capN
+        -- When we receive a RunThread event it means that we have
+        -- begun running a thread at the given timestamp. To track
+        -- what the capability it doing we store what it is doing and
+        -- when it started doing it. When a new event comes along we
+        -- can then properly attribute the time between the previous
+        -- event and the new event to the previous event's time
+        -- counter.
+        --
+        -- Because it is simpler we don't quite store the previous
+        -- event, but rather the counter associated with the previous
+        -- event time. This is stored in 'lastEvTimeCounter'. The time
+        -- that the last event started is stored in 'lastEvTime'.
         updateState timeSel mcountSel = do
           prevTime <- readIORef (lastEvTime capM)
           mPrevEv <- readIORef (lastEvTimeCounter capM)
