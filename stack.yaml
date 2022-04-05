@@ -1,0 +1,5 @@
+resolver: lts-18.27
+
+extra-deps:
+- git: https://github.com/Simspace/ghc-eventlog-socket
+  commit: 407d32e174b011a0c5c8c9489daa1f356f0269e6
